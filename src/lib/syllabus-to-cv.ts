@@ -92,6 +92,11 @@ function csvEscape(v: string): string {
   return /[",\n"]/.test(v) ? `${v.replace(/"/g, '""')}` : v;
 }
 
+/**
+ *
+ * @param rows Array of rows (assignments)
+ * @returns Rows as CSV strings
+ */
 function rowsToCSV(rows: Row[]): string {
   const header = [
     "Course",
@@ -116,6 +121,85 @@ function rowsToCSV(rows: Row[]): string {
       r.DueTimeLocal,
       r.DayOfWeek,
       r.Notes,
-    ];
+    ]
+      .map(csvEscape)
+      .join(",");
+    lines.push(row);
   }
+
+  return lines.join("\n");
+}
+
+export function buildRowsFromModel(
+  modelTextOrObj: unknown,
+  defaultTZ = "America/Los_Angeles"
+) {
+  const data =
+    typeof modelTextOrObj === "string"
+      ? JSON.parse(modelTextOrObj)
+      : modelTextOrObj;
+
+  const parsed = ModelOutputSchema.parse(data);
+  const { course_info, recurring, one_off } = parsed;
+
+  const tz = (course_info as any).timezone ?? defaultTZ;
+  const termStart = DateTime.fromISO(course_info.term_start, { zone: tz });
+  const termEnd = DateTime.fromISO(course_info.term_end, { zone: tz });
+
+  const rows: Row[] = [];
+
+  // Add the one off assignments to the rows
+  for (const item of one_off) {
+    rows.push({
+      Course: course_info.course_code,
+      Title: item.title,
+      Type: "One-Off",
+      Week: "",
+      DateLocal: item.date_local,
+      DueTimeLocal: item.due_time_local,
+      DayOfWeek: "",
+      Notes: item.notes ?? "",
+    });
+  }
+
+  // Add the recurring assignments
+  for (const r of recurring) {
+    const skipWeeks = parseExceptionWeeks(r.exceptions ?? []);
+
+    for (let w = r.start_week; w <= r.end_week; w++) {
+      if (skipWeeks.has(w)) continue;
+
+      const base = weekBase(termStart, w);
+      const date = dateForWeekday(base, DOW_INDEX[r.day_of_week]);
+      if (date < termStart || date > termEnd) continue;
+
+      rows.push({
+        Course: course_info.course_code,
+        Title: r.title,
+        Type: "Recurring",
+        Week: String(w),
+        DateLocal: date.toFormat("yyyy-LL-dd"),
+        DueTimeLocal: r.due_time_local,
+        DayOfWeek: r.day_of_week,
+        Notes: r.notes ?? "",
+      });
+    }
+  }
+
+  rows.sort(
+    (a, b) =>
+      a.DateLocal.localeCompare(b.DateLocal) ||
+      a.DueTimeLocal.localeCompare(b.DueTimeLocal)
+  );
+
+  return { rows, courseInfo: course_info };
+}
+
+export function buildSpreadsheetCSV(
+  modelTextOrObj: unknown,
+  defaultTZ?: string
+) {
+  const { rows, courseInfo } = buildRowsFromModel(modelTextOrObj, defaultTZ);
+  const csv = rowsToCSV(rows);
+  return { csv, rows, courseInfo };
 }
